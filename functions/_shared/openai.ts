@@ -1,11 +1,17 @@
 /**
- * Thin, resilient OpenAI Chat Completions client.
+ * Resilient OpenAI client covering both APIs.
  *
- * Handles the three things that actually break in production:
- *   1. transient 429 / 5xx  -> exponential backoff
- *   2. model-specific parameter rejections (temperature, max tokens)
- *      -> retry once with the offending parameter removed
- *   3. runaway requests -> hard timeout via AbortController
+ *   Chat Completions (/v1/chat/completions) - gpt-4.x, gpt-5.x
+ *   Responses       (/v1/responses)         - the codex models, which are
+ *                                             NOT served by chat/completions
+ *
+ * The endpoint is picked from the model name, so callers just name a model.
+ *
+ * Also handles the three things that actually break in production:
+ *   1. transient 429 / 5xx            -> exponential backoff
+ *   2. model-specific parameter rejections (temperature, token field)
+ *                                     -> retry once without the offender
+ *   3. runaway requests               -> hard timeout via AbortController
  */
 import { HttpError } from "./http.ts";
 
@@ -13,8 +19,16 @@ const API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
 const BASE_URL = (Deno.env.get("OPENAI_BASE_URL") ?? "https://api.openai.com/v1")
   .replace(/\/$/, "");
 
+/** Analysis: cheap, fast, strong at structured JSON. */
 export const DEFAULT_MODEL = Deno.env.get("OPENAI_MODEL") ?? "gpt-4.1";
-const REQUEST_TIMEOUT_MS = Number(Deno.env.get("OPENAI_TIMEOUT_MS") ?? 180_000);
+
+/** Asset generation: the best available coding model. */
+export const CODE_MODEL = Deno.env.get("OPENAI_CODE_MODEL") ?? "gpt-5.3-codex";
+
+/** none | low | medium | high | xhigh - higher costs latency. */
+const REASONING_EFFORT = Deno.env.get("OPENAI_REASONING_EFFORT") ?? "medium";
+
+const REQUEST_TIMEOUT_MS = Number(Deno.env.get("OPENAI_TIMEOUT_MS") ?? 170_000);
 const MAX_ATTEMPTS = 3;
 
 export type Usage = { prompt_tokens?: number; completion_tokens?: number };
@@ -37,6 +51,16 @@ export type ChatOptions = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Codex models are only served by the Responses API. */
+function usesResponsesApi(model: string): boolean {
+  return /codex/i.test(model);
+}
+
+/** Reasoning-family models reject a custom temperature. */
+function isReasoningModel(model: string): boolean {
+  return /^(gpt-5|o[1345])/i.test(model);
+}
+
 export async function chatCompletion(options: ChatOptions): Promise<ChatResult> {
   if (!API_KEY) {
     throw new HttpError(
@@ -47,19 +71,40 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
   }
 
   const model = options.model ?? DEFAULT_MODEL;
+  const responsesApi = usesResponsesApi(model);
+  const endpoint = responsesApi ? `${BASE_URL}/responses` : `${BASE_URL}/chat/completions`;
+  const maxTokens = options.maxTokens ?? 8000;
 
   // deno-lint-ignore no-explicit-any
-  const payload: Record<string, any> = {
-    model,
-    messages: [
-      { role: "system", content: options.system },
-      { role: "user", content: options.user },
-    ],
-    max_completion_tokens: options.maxTokens ?? 8000,
-  };
+  let payload: Record<string, any>;
 
-  if (options.temperature !== undefined) payload.temperature = options.temperature;
-  if (options.jsonMode) payload.response_format = { type: "json_object" };
+  if (responsesApi) {
+    payload = {
+      model,
+      instructions: options.system,
+      input: options.user,
+      max_output_tokens: maxTokens,
+      reasoning: { effort: REASONING_EFFORT },
+    };
+    if (options.jsonMode) payload.text = { format: { type: "json_object" } };
+  } else {
+    payload = {
+      model,
+      messages: [
+        { role: "system", content: options.system },
+        { role: "user", content: options.user },
+      ],
+      max_completion_tokens: maxTokens,
+    };
+
+    // Only classic models accept a custom temperature; sending one to a
+    // reasoning model just burns a request on a 400.
+    if (options.temperature !== undefined && !isReasoningModel(model)) {
+      payload.temperature = options.temperature;
+    }
+    if (isReasoningModel(model)) payload.reasoning_effort = REASONING_EFFORT;
+    if (options.jsonMode) payload.response_format = { type: "json_object" };
+  }
 
   let lastError = "";
 
@@ -68,7 +113,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const response = await fetch(`${BASE_URL}/chat/completions`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${API_KEY}`,
@@ -80,8 +125,10 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
 
       if (response.ok) {
         const data = await response.json();
-        const content: string = data?.choices?.[0]?.message?.content ?? "";
-        const finishReason: string = data?.choices?.[0]?.finish_reason ?? "";
+        const content = extractContent(data);
+        const finishReason = responsesApi
+          ? data?.status ?? ""
+          : data?.choices?.[0]?.finish_reason ?? "";
 
         if (!content.trim()) {
           lastError = "The model returned an empty response.";
@@ -92,13 +139,13 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
           throw new HttpError(502, lastError, "openai_empty_response");
         }
 
-        if (finishReason === "length") {
+        if (finishReason === "length" || finishReason === "incomplete") {
           console.warn("OpenAI response hit the token ceiling; output may be cut.");
         }
 
         return {
           content,
-          usage: data?.usage ?? {},
+          usage: normalizeUsage(data),
           model: data?.model ?? model,
         };
       }
@@ -106,7 +153,6 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
       const bodyText = await response.text();
       lastError = extractMessage(bodyText) || `OpenAI returned ${response.status}`;
 
-      // A parameter this model does not accept: strip it and retry once.
       if (response.status === 400) {
         const stripped = stripUnsupportedParam(payload, bodyText);
         if (stripped) {
@@ -121,6 +167,14 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
           502,
           "The OpenAI API key was rejected. Check OPENAI_API_KEY.",
           "openai_unauthorized",
+        );
+      }
+
+      if (response.status === 404) {
+        throw new HttpError(
+          502,
+          `The model "${model}" is not available on this API key.`,
+          "openai_model_unavailable",
         );
       }
 
@@ -142,7 +196,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
 
       const aborted = error instanceof DOMException && error.name === "AbortError";
       lastError = aborted
-        ? "The AI request timed out."
+        ? "The AI request timed out. Try again, or lower OPENAI_REASONING_EFFORT."
         : error instanceof Error
         ? error.message
         : String(error);
@@ -161,6 +215,42 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
   throw new HttpError(502, lastError || "OpenAI request failed", "openai_error");
 }
 
+/* ------------------------------------------------------------------ */
+/* Response shapes                                                     */
+/* ------------------------------------------------------------------ */
+
+// deno-lint-ignore no-explicit-any
+function extractContent(data: any): string {
+  // Chat Completions
+  const chat = data?.choices?.[0]?.message?.content;
+  if (typeof chat === "string" && chat) return chat;
+
+  // Responses API convenience field
+  if (typeof data?.output_text === "string" && data.output_text) return data.output_text;
+
+  // Responses API long form: output[] -> content[] -> text
+  if (Array.isArray(data?.output)) {
+    const text = data.output
+      // deno-lint-ignore no-explicit-any
+      .flatMap((item: any) => (Array.isArray(item?.content) ? item.content : []))
+      // deno-lint-ignore no-explicit-any
+      .map((part: any) => (typeof part?.text === "string" ? part.text : ""))
+      .join("");
+    if (text) return text;
+  }
+
+  return "";
+}
+
+// deno-lint-ignore no-explicit-any
+function normalizeUsage(data: any): Usage {
+  const usage = data?.usage ?? {};
+  return {
+    prompt_tokens: usage.prompt_tokens ?? usage.input_tokens,
+    completion_tokens: usage.completion_tokens ?? usage.output_tokens,
+  };
+}
+
 /** Remove a parameter the model complained about. Returns its name, or null. */
 // deno-lint-ignore no-explicit-any
 function stripUnsupportedParam(payload: Record<string, any>, body: string): string | null {
@@ -169,6 +259,12 @@ function stripUnsupportedParam(payload: Record<string, any>, body: string): stri
   if (lowered.includes("temperature") && "temperature" in payload) {
     delete payload.temperature;
     return "temperature";
+  }
+
+  if (lowered.includes("reasoning") && ("reasoning" in payload || "reasoning_effort" in payload)) {
+    delete payload.reasoning;
+    delete payload.reasoning_effort;
+    return "reasoning";
   }
 
   if (lowered.includes("max_completion_tokens") && "max_completion_tokens" in payload) {
@@ -207,7 +303,6 @@ export function stripCodeFences(raw: string): string {
   const match = text.match(fence);
   if (match) text = match[1];
 
-  // Fall back to trimming stray leading/trailing fences.
   text = text.replace(/^```[a-zA-Z]*\s*/, "").replace(/```\s*$/, "");
   return text.trim();
 }

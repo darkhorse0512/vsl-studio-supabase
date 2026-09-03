@@ -57,6 +57,8 @@ the rest:
 ```bash
 supabase secrets set OPENAI_API_KEY=sk-...
 supabase secrets set OPENAI_MODEL=gpt-4.1
+supabase secrets set OPENAI_CODE_MODEL=gpt-5.3-codex
+supabase secrets set OPENAI_REASONING_EFFORT=medium
 # optional
 supabase secrets set OPENAI_TIMEOUT_MS=180000
 supabase secrets set ALLOWED_ORIGIN=https://app.yourdomain.com
@@ -153,7 +155,60 @@ The first two raise `Forbidden (42501)` for non-admins, so they are safe to expo
 
 ---
 
-## 8. Editing the AI behaviour
+## 8. Model routing
+
+Two models, because the two jobs are different:
+
+| Step | Secret | Default | Endpoint |
+|---|---|---|---|
+| VSL analysis | `OPENAI_MODEL` | `gpt-4.1` | `/v1/chat/completions` |
+| Sales page + quiz | `OPENAI_CODE_MODEL` | `gpt-5.3-codex` | `/v1/responses` |
+
+The codex models are **not served by `/v1/chat/completions`** — the client in `openai.ts` detects
+a codex model name and switches to the Responses API automatically, normalising both response
+shapes back to a single `{ content, usage, model }`. It also omits `temperature` for
+reasoning-family models (they reject anything but the default) and strips any parameter a model
+rejects before retrying, so swapping models never hard-fails.
+
+Latency matters, because Supabase edge functions have a wall-clock limit and a timeout means a
+paid API call thrown away. `OPENAI_TIMEOUT_MS` defaults to 170s. Measured against a real project
+prompt (~28k characters, full sales page):
+
+| Model | Time | Output | Notes |
+|---|---|---|---|
+| `gpt-5.3-codex` | ~78s | 31 KB | Purpose-built for code — the default |
+| `gpt-4.1` | ~71s | 58 KB | Previous default |
+| `gpt-5.5` (low effort) | ~102s | 38 KB | Flagship, slower |
+| `gpt-5.5` (medium effort) | ~160s | 58 KB | Too slow — risks a timeout |
+
+`OPENAI_REASONING_EFFORT` (`none` | `low` | `medium` | `high` | `xhigh`, default `medium`) trades
+latency for quality. If generations start timing out, lower it before changing the model.
+
+---
+
+## 9. Visual style presets
+
+The analysis picks a palette from the niche, and left alone it is often drab. `style_preset` and
+`primary_color` in a project's `generation_settings` override it, and the block they produce
+(`buildStyleDirection` in `prompts.ts`) is prepended to **both** generators, so the sales page and
+the quiz never diverge visually.
+
+| Preset | Direction |
+|---|---|
+| *(empty)* | Use the analysis palette |
+| `modern` | Modern SaaS — cool neutrals, whitespace, restraint |
+| `bold` | Bold direct response — high contrast, oversized type, marker highlights |
+| `elegant` | Editorial — serif headings, hairlines, premium restraint |
+| `warm` | Wellness — cream, soft radii, organic shapes |
+| `vibrant` | Gradient — glassy cards, colourful blobs |
+| `dark` | Dark premium — dark canvas, luminous accent |
+
+`primary_color` accepts any hex and overrides `analysis.brand.primary_color`; the model derives its
+own hover shade and tint from it.
+
+---
+
+## 10. Editing the AI behaviour
 
 Everything the model is told lives in `functions/_shared/prompts.ts`:
 
@@ -177,7 +232,7 @@ rather than a crash.
 
 ---
 
-## 9. Local testing
+## 11. Local testing
 
 ```bash
 supabase start

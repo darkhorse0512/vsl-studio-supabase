@@ -8,9 +8,10 @@
  */
 import { HttpError, json, readJson, serveJson } from "../_shared/http.ts";
 import { requireApproved } from "../_shared/supabase.ts";
-import { chatCompletion, stripCodeFences } from "../_shared/openai.ts";
+import { CODE_MODEL, chatCompletion, stripCodeFences } from "../_shared/openai.ts";
 import {
   buildAdaptationBrief,
+  buildStyleDirection,
   buildQuizPrompt,
   buildSalesPagePrompt,
   QUIZ_SYSTEM,
@@ -30,7 +31,7 @@ const DAILY_LIMIT = 60;
 
 const CONFIG: Record<AssetType, {
   system: string;
-  prompt: (a: VslAnalysis, adaptation: string) => string;
+  prompt: (a: VslAnalysis, adaptation: string, style: string) => string;
   temperature: number;
   maxTokens: number;
   title: (a: VslAnalysis) => string;
@@ -109,12 +110,14 @@ Deno.serve(serveJson(async (req) => {
   const settings = normalizeSettings(project.generation_settings);
   const analysis = applySettings(source, settings);
   const adaptation = buildAdaptationBrief(settings, source);
+  const style = buildStyleDirection(settings);
 
   const config = CONFIG[type];
 
   const result = await chatCompletion({
     system: config.system,
-    user: config.prompt(analysis, adaptation),
+    user: config.prompt(analysis, adaptation, style),
+    model: CODE_MODEL,
     temperature: config.temperature,
     maxTokens: config.maxTokens,
   });

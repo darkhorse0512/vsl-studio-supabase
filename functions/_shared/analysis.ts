@@ -297,6 +297,8 @@ export type GenerationSettings = {
   cta_url: string;
   audience_note: string;
   custom_instructions: string;
+  style_preset: string;
+  primary_color: string;
 };
 
 export const EMPTY_SETTINGS: GenerationSettings = {
@@ -311,6 +313,8 @@ export const EMPTY_SETTINGS: GenerationSettings = {
   cta_url: "",
   audience_note: "",
   custom_instructions: "",
+  style_preset: "",
+  primary_color: "",
 };
 
 // deno-lint-ignore no-explicit-any
@@ -329,12 +333,19 @@ export function normalizeSettings(raw: any): GenerationSettings {
     cta_url: str(input.cta_url),
     audience_note: str(input.audience_note).slice(0, 1000),
     custom_instructions: str(input.custom_instructions).slice(0, 4000),
+    style_preset: str(input.style_preset),
+    primary_color: str(input.primary_color),
   };
 }
 
-/** True when the operator has actually asked for an adaptation. */
+/**
+ * True when the operator has asked for a PRODUCT adaptation. Visual choices
+ * (style preset, colour) are handled separately and must not trigger the
+ * "you are selling a different product" block on their own.
+ */
 export function hasSettings(settings: GenerationSettings): boolean {
-  return Object.values(settings).some((value) => value !== "");
+  const { style_preset: _style, primary_color: _color, ...product } = settings;
+  return Object.values(product).some((value) => value !== "");
 }
 
 /**
@@ -358,6 +369,10 @@ export function applySettings(
 
   if (settings.audience_note) {
     next.target_audience.summary = settings.audience_note;
+  }
+
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(settings.primary_color)) {
+    next.brand.primary_color = settings.primary_color;
   }
 
   return next;

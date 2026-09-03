@@ -314,6 +314,99 @@ How to use the analysis:
 }
 
 /* ==================================================================== */
+/* Visual style presets                                                 */
+/*                                                                      */
+/* The analysis picks a palette from the niche, and it is often drab.   */
+/* A preset overrides that with a deliberate, opinionated art direction */
+/* - the single biggest lever on how designed the output looks. Applied */
+/* identically to both assets.                                          */
+/* ==================================================================== */
+
+const STYLE_PRESETS: Record<string, string> = {
+  modern: `VISUAL STYLE: MODERN SAAS
+- Palette: near-white canvas (#ffffff / #f8fafc), deep slate ink (#0f172a), one confident accent.
+  Keep it cool and restrained; colour appears only on CTAs, icons and key numbers.
+- Typography: tight, geometric, heavy headings (font-weight 800, letter-spacing -0.03em).
+  Body in #475569 at 1.0625rem/1.7.
+- Surfaces: white cards on a #f8fafc band, 1px #e2e8f0 borders, radius 16px, very soft shadows.
+- Texture: a faint dot or grid pattern behind the hero only, masked to fade out.
+- Feel: precise, calm, credible. Lots of whitespace. Nothing shouts.`,
+
+  bold: `VISUAL STYLE: BOLD DIRECT RESPONSE
+- Palette: high contrast. Near-black ink (#0b0f19), white surfaces, one saturated accent used
+  aggressively (buttons, highlight marks, numbers), plus a warning colour for scarcity.
+- Typography: oversized headings - h1 clamp(2.4rem, 6.5vw, 4.5rem), weight 900, tight leading.
+  Highlight 2-4 words with a thick marker-style background sweep in the accent.
+- Surfaces: strong section contrast - alternate white and a dark band with light text.
+- Devices: a bordered "offer box" with a coloured header bar, a struck-through anchor price,
+  and the real price rendered very large. Scarcity as a solid alert strip.
+- Feel: urgent, punchy, unmissable. This is a page that sells hard.`,
+
+  elegant: `VISUAL STYLE: ELEGANT EDITORIAL
+- Palette: warm off-white paper (#faf8f5), rich near-black text (#1c1917), a muted jewel accent
+  (deep teal, burgundy or forest). Gold-ish hairlines. No pure black, no pure white.
+- Typography: Georgia, "Times New Roman", serif for headings at generous sizes with wide
+  leading; sans-serif for body and UI. Small-caps eyebrow labels with wide letter-spacing.
+- Surfaces: almost no cards - use hairline rules, generous margins and a narrow 640px reading
+  column. Radius 6px maximum. Shadows are barely visible.
+- Feel: premium, considered, magazine-like. Restraint everywhere.`,
+
+  warm: `VISUAL STYLE: WARM WELLNESS
+- Palette: soft cream (#fdfaf6), warm sand and clay tones, a calm green or terracotta accent,
+  gentle brown-grey text (#4a4139). Nothing harsh or corporate.
+- Typography: rounded, friendly, medium weights. Comfortable 1.75 line-height.
+- Surfaces: large border radii (20-28px), soft blurred shadows, organic blob shapes drawn in
+  CSS behind sections, gentle vertical gradients between bands.
+- Feel: reassuring, human, unhurried. Suits health, food, self-care and coaching offers.`,
+
+  vibrant: `VISUAL STYLE: VIBRANT GRADIENT
+- Palette: a bright multi-stop gradient identity (two or three hues), near-white base, deep
+  ink text. Gradients on the hero, the CTA buttons and small accents only.
+- Typography: heavy, modern, tight. Gradient-filled text for 2-3 headline words using
+  background-clip: text.
+- Surfaces: glassy cards - translucent white, 1px light border, backdrop-filter: blur(12px),
+  sitting over soft coloured blobs blurred at 80-120px.
+- Feel: energetic, contemporary, product-launch. Keep contrast legal: text never sits directly
+  on a busy gradient without a solid backing.`,
+
+  dark: `VISUAL STYLE: DARK PREMIUM
+- Palette: deep near-black background (#0a0a0f) with layered dark surfaces (#14141c), light
+  text (#e8e8f0), and one luminous accent used as a glow.
+- Typography: bright white headings, body at ~70% opacity. Tight tracking on large sizes.
+- Surfaces: subtle 1px light borders (rgba(255,255,255,.08)), radial accent glows behind the
+  hero and the offer box, and cards that brighten on hover.
+- Contrast: every text/background pair must still clear 4.5:1 - do not let body text fade out.
+- Feel: high-end, technological, confident.`,
+};
+
+export const STYLE_PRESET_IDS = Object.keys(STYLE_PRESETS);
+
+/**
+ * Art direction block. Emitted for both assets so a project's sales page and
+ * quiz always look like the same product.
+ */
+export function buildStyleDirection(settings: GenerationSettings): string {
+  const preset = STYLE_PRESETS[settings.style_preset];
+  const colour = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(settings.primary_color)
+    ? settings.primary_color
+    : "";
+
+  if (!preset && !colour) return "";
+
+  const parts: string[] = [];
+  if (preset) parts.push(preset);
+  if (colour) {
+    parts.push(
+      `BRAND COLOUR: use ${colour} as the primary brand colour. Derive a darker shade for
+hover states and a light tint (8-12% opacity) for backgrounds from it. It overrides the
+palette in the analysis brief.`,
+    );
+  }
+
+  return `\n${parts.join("\n\n")}\n`;
+}
+
+/* ==================================================================== */
 /* 2. Sales page                                                        */
 /* ==================================================================== */
 
@@ -323,7 +416,11 @@ written as a single HTML file. Your pages look like they were designed by a prof
 confident typography, generous spacing, clear visual hierarchy and a rhythm that pulls the reader
 toward the call to action.`;
 
-export function buildSalesPagePrompt(analysis: VslAnalysis, adaptation = ""): string {
+export function buildSalesPagePrompt(
+  analysis: VslAnalysis,
+  adaptation = "",
+  style = "",
+): string {
   return `${adaptation}Build the sales page for the offer described in this brief.
 
 Required sections, in this order (omit a section only when its data is empty):
@@ -377,7 +474,7 @@ Copy notes:
 - Match the tone described in the brief.
 
 ${SHARED_BUILD_RULES}
-
+${style}
 === ANALYSIS BRIEF (JSON) ===
 ${analysisBrief(analysis)}`;
 }
@@ -391,7 +488,11 @@ interactive lead-generation quizzes. You write clean, dependency-free vanilla Ja
 polished CSS in a single HTML file. Your quizzes feel effortless: one question per screen, obvious
 progress, and a result that lands as a personal insight rather than a sales pitch.`;
 
-export function buildQuizPrompt(analysis: VslAnalysis, adaptation = ""): string {
+export function buildQuizPrompt(
+  analysis: VslAnalysis,
+  adaptation = "",
+  style = "",
+): string {
   return `${adaptation}Build the interactive quiz for the offer described in this brief.
 
 Structure:
@@ -440,7 +541,7 @@ JavaScript rules:
 - Must not throw on any path. No console errors.
 
 ${SHARED_BUILD_RULES}
-
+${style}
 === ANALYSIS BRIEF (JSON) ===
 ${analysisBrief(analysis)}`;
 }
