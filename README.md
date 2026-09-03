@@ -163,6 +163,11 @@ Everything the model is told lives in `functions/_shared/prompts.ts`:
 - `SALES_PAGE_SYSTEM` + `buildSalesPagePrompt` — the twelve required page sections.
 - `QUIZ_SYSTEM` + `buildQuizPrompt` — screens, navigation, weighted scoring, result logic.
 
+`buildAdaptationBrief` builds the TARGET PRODUCT block from `projects.generation_settings`.
+It is prepended identically to both generator prompts, and `applySettings` (in `analysis.ts`) folds
+the same overrides into the analysis object itself - so the two assets cannot be adapted
+differently. Operator custom instructions are injected last and declared highest priority.
+
 If you change the analysis JSON shape, update `functions/_shared/analysis.ts` (the `VslAnalysis`
 type and `normalizeAnalysis`) and the `AnalysisPanel` component in both frontends to match.
 

@@ -275,3 +275,90 @@ export function normalizeAnalysis(raw: any): VslAnalysis {
 export function analysisBrief(analysis: VslAnalysis): string {
   return JSON.stringify(analysis, null, 2);
 }
+
+/* ==================================================================== */
+/*  Target product settings                                             */
+/*                                                                      */
+/*  The VSL that was analysed and the product being sold are often not  */
+/*  the same offer. These settings override the analysed offer at       */
+/*  generation time, and because they live on the project both assets   */
+/*  receive exactly the same overrides.                                 */
+/* ==================================================================== */
+
+export type GenerationSettings = {
+  language: string;
+  country: string;
+  product_name: string;
+  product_type: string;
+  price: string;
+  payment_note: string;
+  guarantee: string;
+  cta_label: string;
+  cta_url: string;
+  audience_note: string;
+  custom_instructions: string;
+};
+
+export const EMPTY_SETTINGS: GenerationSettings = {
+  language: "",
+  country: "",
+  product_name: "",
+  product_type: "",
+  price: "",
+  payment_note: "",
+  guarantee: "",
+  cta_label: "",
+  cta_url: "",
+  audience_note: "",
+  custom_instructions: "",
+};
+
+// deno-lint-ignore no-explicit-any
+export function normalizeSettings(raw: any): GenerationSettings {
+  const input = raw && typeof raw === "object" ? raw : {};
+
+  return {
+    language: str(input.language),
+    country: str(input.country),
+    product_name: str(input.product_name),
+    product_type: str(input.product_type),
+    price: str(input.price),
+    payment_note: str(input.payment_note),
+    guarantee: str(input.guarantee),
+    cta_label: str(input.cta_label),
+    cta_url: str(input.cta_url),
+    audience_note: str(input.audience_note).slice(0, 1000),
+    custom_instructions: str(input.custom_instructions).slice(0, 4000),
+  };
+}
+
+/** True when the operator has actually asked for an adaptation. */
+export function hasSettings(settings: GenerationSettings): boolean {
+  return Object.values(settings).some((value) => value !== "");
+}
+
+/**
+ * Fold the settings into the analysis, so every generator downstream reads
+ * one already-adapted brief. Empty fields fall back to the analysed value.
+ */
+export function applySettings(
+  analysis: VslAnalysis,
+  settings: GenerationSettings,
+): VslAnalysis {
+  const next: VslAnalysis = JSON.parse(JSON.stringify(analysis));
+
+  if (settings.language) next.language = settings.language;
+  if (settings.product_name) next.offer_name = settings.product_name;
+  if (settings.product_type) next.product_type = settings.product_type;
+  if (settings.price) next.offer.price = settings.price;
+  if (settings.payment_note) next.offer.payment_options = settings.payment_note;
+  if (settings.guarantee) next.offer.guarantee = settings.guarantee;
+  if (settings.cta_label) next.cta.primary_label = settings.cta_label;
+  if (settings.cta_url) next.cta.url = settings.cta_url;
+
+  if (settings.audience_note) {
+    next.target_audience.summary = settings.audience_note;
+  }
+
+  return next;
+}

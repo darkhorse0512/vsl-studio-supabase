@@ -10,12 +10,18 @@ import { HttpError, json, readJson, serveJson } from "../_shared/http.ts";
 import { requireApproved } from "../_shared/supabase.ts";
 import { chatCompletion, stripCodeFences } from "../_shared/openai.ts";
 import {
+  buildAdaptationBrief,
   buildQuizPrompt,
   buildSalesPagePrompt,
   QUIZ_SYSTEM,
   SALES_PAGE_SYSTEM,
 } from "../_shared/prompts.ts";
-import { normalizeAnalysis, type VslAnalysis } from "../_shared/analysis.ts";
+import {
+  applySettings,
+  normalizeAnalysis,
+  normalizeSettings,
+  type VslAnalysis,
+} from "../_shared/analysis.ts";
 
 type AssetType = "sales_page" | "quiz";
 type Body = { projectId?: string; type?: AssetType };
@@ -24,7 +30,7 @@ const DAILY_LIMIT = 60;
 
 const CONFIG: Record<AssetType, {
   system: string;
-  prompt: (a: VslAnalysis) => string;
+  prompt: (a: VslAnalysis, adaptation: string) => string;
   temperature: number;
   maxTokens: number;
   title: (a: VslAnalysis) => string;
@@ -34,7 +40,7 @@ const CONFIG: Record<AssetType, {
     system: SALES_PAGE_SYSTEM,
     prompt: buildSalesPagePrompt,
     temperature: 0.75,
-    maxTokens: 16000,
+    maxTokens: 24000,
     title: (a) => a.headline || a.big_promise || a.offer_name,
     requiresScript: false,
   },
@@ -42,7 +48,7 @@ const CONFIG: Record<AssetType, {
     system: QUIZ_SYSTEM,
     prompt: buildQuizPrompt,
     temperature: 0.65,
-    maxTokens: 16000,
+    maxTokens: 20000,
     title: (a) => a.quiz_blueprint.title || `${a.offer_name} quiz`,
     requiresScript: true,
   },
@@ -61,7 +67,7 @@ Deno.serve(serveJson(async (req) => {
 
   const { data: project, error } = await db
     .from("projects")
-    .select("id, user_id, name, status, analysis")
+    .select("id, user_id, name, status, analysis, generation_settings")
     .eq("id", projectId)
     .maybeSingle();
 
@@ -95,12 +101,20 @@ Deno.serve(serveJson(async (req) => {
     );
   }
 
-  const analysis = normalizeAnalysis(project.analysis);
+  // The source analysis, the operator's target-product overrides, and the
+  // adapted brief that both asset types are generated from. Because the
+  // settings live on the project, the sales page and the quiz always receive
+  // an identical brief - the consistency guarantee survives the adaptation.
+  const source = normalizeAnalysis(project.analysis);
+  const settings = normalizeSettings(project.generation_settings);
+  const analysis = applySettings(source, settings);
+  const adaptation = buildAdaptationBrief(settings, source);
+
   const config = CONFIG[type];
 
   const result = await chatCompletion({
     system: config.system,
-    user: config.prompt(analysis),
+    user: config.prompt(analysis, adaptation),
     temperature: config.temperature,
     maxTokens: config.maxTokens,
   });
