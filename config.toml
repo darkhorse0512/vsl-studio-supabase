@@ -61,3 +61,6 @@ verify_jwt = true
 
 [functions.admin-users]
 verify_jwt = true
+
+[functions.admin-prompts]
+verify_jwt = true

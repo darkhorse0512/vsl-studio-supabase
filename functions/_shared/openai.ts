@@ -47,6 +47,8 @@ export type ChatOptions = {
   maxTokens?: number;
   /** Force a JSON object response (used by the analysis step). */
   jsonMode?: boolean;
+  /** Per-call override of OPENAI_REASONING_EFFORT. */
+  reasoningEffort?: string;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -74,6 +76,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
   const responsesApi = usesResponsesApi(model);
   const endpoint = responsesApi ? `${BASE_URL}/responses` : `${BASE_URL}/chat/completions`;
   const maxTokens = options.maxTokens ?? 8000;
+  const effort = options.reasoningEffort || REASONING_EFFORT;
 
   // deno-lint-ignore no-explicit-any
   let payload: Record<string, any>;
@@ -84,7 +87,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
       instructions: options.system,
       input: options.user,
       max_output_tokens: maxTokens,
-      reasoning: { effort: REASONING_EFFORT },
+      reasoning: { effort },
     };
     if (options.jsonMode) payload.text = { format: { type: "json_object" } };
   } else {
@@ -102,7 +105,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatResult> 
     if (options.temperature !== undefined && !isReasoningModel(model)) {
       payload.temperature = options.temperature;
     }
-    if (isReasoningModel(model)) payload.reasoning_effort = REASONING_EFFORT;
+    if (isReasoningModel(model)) payload.reasoning_effort = effort;
     if (options.jsonMode) payload.response_format = { type: "json_object" };
   }
 

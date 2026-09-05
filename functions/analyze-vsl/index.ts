@@ -9,7 +9,8 @@
 import { HttpError, json, readJson, serveJson } from "../_shared/http.ts";
 import { requireApproved } from "../_shared/supabase.ts";
 import { chatCompletion, parseJsonLoose } from "../_shared/openai.ts";
-import { ANALYSIS_SYSTEM, buildAnalysisPrompt } from "../_shared/prompts.ts";
+import { ANALYSIS_SCHEMA } from "../_shared/prompts.ts";
+import { renderTemplate, resolveTemplate } from "../_shared/templates.ts";
 import { normalizeAnalysis } from "../_shared/analysis.ts";
 
 const MIN_CHARS = 200;
@@ -74,11 +75,19 @@ Deno.serve(serveJson(async (req) => {
   try {
     const truncated = text.slice(0, MAX_CHARS);
 
+    // The prompt is admin-editable; the code default is the fallback.
+    const template = await resolveTemplate(db, "analysis");
+
     const result = await chatCompletion({
-      system: ANALYSIS_SYSTEM,
-      user: buildAnalysisPrompt(truncated),
-      temperature: 0.35,
-      maxTokens: 8000,
+      system: template.system,
+      user: renderTemplate(template.user, {
+        SCHEMA: ANALYSIS_SCHEMA,
+        VSL_TEXT: truncated,
+      }),
+      model: template.model || undefined,
+      temperature: template.temperature ?? undefined,
+      maxTokens: template.maxTokens,
+      reasoningEffort: template.reasoningEffort || undefined,
       jsonMode: true,
     });
 

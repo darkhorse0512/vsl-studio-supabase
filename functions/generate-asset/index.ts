@@ -1,59 +1,36 @@
 /**
  * POST /functions/v1/generate-asset
- * Body: { projectId: string, type: "sales_page" | "quiz" }
+ * Body: { projectId, type: "sales_page" | "quiz" | "product" | "ad_creative" }
  *
- * Generates a self-contained HTML asset from the project's stored analysis.
- * Both asset types read the SAME analysis object, which is what guarantees
- * the sales page and the quiz stay consistent with one another.
+ * Every asset is generated from the SAME analysis + target-product settings,
+ * which is what keeps the sales page, the quiz, the deliverable and the ad
+ * creative telling one consistent story.
+ *
+ * The prompt itself comes from the template registry, so an administrator can
+ * rewrite any of them from the admin panel without a deploy.
  */
 import { HttpError, json, readJson, serveJson } from "../_shared/http.ts";
 import { requireApproved } from "../_shared/supabase.ts";
 import { CODE_MODEL, chatCompletion, stripCodeFences } from "../_shared/openai.ts";
 import {
+  analysisBrief,
   buildAdaptationBrief,
   buildStyleDirection,
-  buildQuizPrompt,
-  buildSalesPagePrompt,
-  QUIZ_SYSTEM,
-  SALES_PAGE_SYSTEM,
+  SHARED_BUILD_RULES,
 } from "../_shared/prompts.ts";
 import {
   applySettings,
   normalizeAnalysis,
   normalizeSettings,
-  type VslAnalysis,
 } from "../_shared/analysis.ts";
+import { renderTemplate, resolveTemplate, type TemplateId } from "../_shared/templates.ts";
 
-type AssetType = "sales_page" | "quiz";
+const ASSET_TYPES = ["sales_page", "quiz", "product", "ad_creative"] as const;
+type AssetType = (typeof ASSET_TYPES)[number];
+
 type Body = { projectId?: string; type?: AssetType };
 
 const DAILY_LIMIT = 60;
-
-const CONFIG: Record<AssetType, {
-  system: string;
-  prompt: (a: VslAnalysis, adaptation: string, style: string) => string;
-  temperature: number;
-  maxTokens: number;
-  title: (a: VslAnalysis) => string;
-  requiresScript: boolean;
-}> = {
-  sales_page: {
-    system: SALES_PAGE_SYSTEM,
-    prompt: buildSalesPagePrompt,
-    temperature: 0.75,
-    maxTokens: 24000,
-    title: (a) => a.headline || a.big_promise || a.offer_name,
-    requiresScript: false,
-  },
-  quiz: {
-    system: QUIZ_SYSTEM,
-    prompt: buildQuizPrompt,
-    temperature: 0.65,
-    maxTokens: 20000,
-    title: (a) => a.quiz_blueprint.title || `${a.offer_name} quiz`,
-    requiresScript: true,
-  },
-};
 
 Deno.serve(serveJson(async (req) => {
   const { userId, profile, db } = await requireApproved(req);
@@ -62,8 +39,8 @@ Deno.serve(serveJson(async (req) => {
   if (!projectId || typeof projectId !== "string") {
     throw new HttpError(400, "projectId is required", "bad_request");
   }
-  if (type !== "sales_page" && type !== "quiz") {
-    throw new HttpError(400, "type must be 'sales_page' or 'quiz'", "bad_request");
+  if (!type || !ASSET_TYPES.includes(type)) {
+    throw new HttpError(400, `type must be one of: ${ASSET_TYPES.join(", ")}`, "bad_request");
   }
 
   const { data: project, error } = await db
@@ -80,11 +57,7 @@ Deno.serve(serveJson(async (req) => {
   }
 
   if (!project.analysis) {
-    throw new HttpError(
-      409,
-      "Run the VSL analysis before generating assets.",
-      "analysis_missing",
-    );
+    throw new HttpError(409, "Run the VSL analysis before generating assets.", "analysis_missing");
   }
 
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -102,28 +75,35 @@ Deno.serve(serveJson(async (req) => {
     );
   }
 
-  // The source analysis, the operator's target-product overrides, and the
-  // adapted brief that both asset types are generated from. Because the
-  // settings live on the project, the sales page and the quiz always receive
-  // an identical brief - the consistency guarantee survives the adaptation.
+  // Source analysis + operator overrides -> one adapted brief shared by all
+  // four generators.
   const source = normalizeAnalysis(project.analysis);
   const settings = normalizeSettings(project.generation_settings);
   const analysis = applySettings(source, settings);
-  const adaptation = buildAdaptationBrief(settings, source);
-  const style = buildStyleDirection(settings);
 
-  const config = CONFIG[type];
+  const template = await resolveTemplate(db, type as TemplateId);
 
-  const result = await chatCompletion({
-    system: config.system,
-    user: config.prompt(analysis, adaptation, style),
-    model: CODE_MODEL,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
+  const userPrompt = renderTemplate(template.user, {
+    ADAPTATION: buildAdaptationBrief(settings, source),
+    STYLE: buildStyleDirection(settings),
+    BUILD_RULES: SHARED_BUILD_RULES,
+    ANALYSIS_JSON: analysisBrief(analysis),
   });
 
-  const code = stripCodeFences(result.content);
-  assertUsableHtml(code, config.requiresScript);
+  const result = await chatCompletion({
+    system: template.system,
+    user: userPrompt,
+    model: template.model || CODE_MODEL,
+    temperature: template.temperature ?? undefined,
+    maxTokens: template.maxTokens,
+    reasoningEffort: template.reasoningEffort || undefined,
+  });
+
+  const code = template.outputKind === "markdown"
+    ? cleanMarkdown(result.content)
+    : stripCodeFences(result.content);
+
+  assertUsable(code, type, template.outputKind);
 
   const { data: asset, error: insertError } = await db
     .from("assets")
@@ -131,7 +111,7 @@ Deno.serve(serveJson(async (req) => {
       project_id: project.id,
       user_id: project.user_id,
       type,
-      title: config.title(analysis).slice(0, 200),
+      title: assetTitle(type, analysis).slice(0, 200),
       code,
       model: result.model,
       prompt_tokens: result.usage.prompt_tokens ?? null,
@@ -142,11 +122,61 @@ Deno.serve(serveJson(async (req) => {
 
   if (insertError) throw new HttpError(500, insertError.message, "db_error");
 
-  return json({ asset, usage: result.usage });
+  return json({ asset, usage: result.usage, promptOverridden: template.overridden });
 }));
 
+/* ------------------------------------------------------------------ */
+
+// deno-lint-ignore no-explicit-any
+function assetTitle(type: AssetType, analysis: any): string {
+  switch (type) {
+    case "quiz":
+      return analysis.quiz_blueprint?.title || `${analysis.offer_name} quiz`;
+    case "product":
+      return analysis.offer_name || analysis.solution?.name || "Product";
+    case "ad_creative":
+      return `${analysis.offer_name} - ad creative`;
+    default:
+      return analysis.headline || analysis.big_promise || analysis.offer_name;
+  }
+}
+
+/** The markdown asset only needs its outer fence removed, if present. */
+function cleanMarkdown(raw: string): string {
+  const text = raw.trim();
+  const fenced = text.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n?```$/);
+  return (fenced ? fenced[1] : text).trim();
+}
+
 /** Reject obviously broken output before it reaches the user's preview. */
-function assertUsableHtml(code: string, requiresScript: boolean): void {
+function assertUsable(code: string, type: AssetType, kind: string): void {
+  if (code.length < 800) {
+    throw new HttpError(
+      502,
+      "The generated document was unusually short. Please try again.",
+      "output_too_short",
+    );
+  }
+
+  if (kind === "markdown") {
+    // An image-prompt package that came back as a web page is a failure.
+    if (/^\s*<!doctype html/i.test(code) || /<html[\s>]/i.test(code)) {
+      throw new HttpError(
+        502,
+        "The ad creative came back as HTML instead of text. Please try again.",
+        "invalid_markdown",
+      );
+    }
+    if (!code.includes("#")) {
+      throw new HttpError(
+        502,
+        "The ad creative is missing its sections. Please try again.",
+        "invalid_markdown",
+      );
+    }
+    return;
+  }
+
   const lowered = code.toLowerCase();
 
   if (!lowered.includes("<html") || !lowered.includes("</html>")) {
@@ -165,7 +195,7 @@ function assertUsableHtml(code: string, requiresScript: boolean): void {
     );
   }
 
-  if (requiresScript && !lowered.includes("<script")) {
+  if (type === "quiz" && !lowered.includes("<script")) {
     throw new HttpError(
       502,
       "The generated quiz has no JavaScript and would not be interactive. Please try again.",
@@ -173,11 +203,11 @@ function assertUsableHtml(code: string, requiresScript: boolean): void {
     );
   }
 
-  if (code.length < 1500) {
+  if (type === "product" && !lowered.includes("@page") && !lowered.includes("@media print")) {
     throw new HttpError(
       502,
-      "The generated document was unusually short. Please try again.",
-      "output_too_short",
+      "The product was generated without print styles, so it would not export cleanly to PDF. Please try again.",
+      "invalid_product",
     );
   }
 }
